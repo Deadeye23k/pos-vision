@@ -1,0 +1,36 @@
+digraph arch {
+  rankdir=LR;
+  bgcolor="white";
+  fontname="Helvetica";
+  node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=12, margin="0.2,0.12"];
+  edge [fontname="Helvetica", fontsize=10, color="#555555"];
+
+  subgraph cluster_browser {
+    label="Browser (localhost:8080)"; style="rounded,dashed"; color="#999999"; fontsize=12;
+    ui [label="Alpine.js UI\ncamera preview, capture,\nconfirm / manual search", fillcolor="#FAECE7", color="#D85A30"];
+  }
+
+  subgraph cluster_server {
+    label="Rust / Axum server"; style="rounded"; color="#185FA5"; fontsize=12;
+    api [label="main.rs\nroutes: /recognize /confirm\n/products /health /stats.md", fillcolor="#E6F1FB", color="#185FA5"];
+    vision [label="vision.rs\nMobileNetV2 (ONNX)\nvia ONNX Runtime", fillcolor="#E6F1FB", color="#185FA5"];
+    decision [label="decision.rs\nthresholds ->\nAUTO_ACCEPT / REVIEW / MANUAL", fillcolor="#E6F1FB", color="#185FA5"];
+    catalogue [label="catalogue.rs\nproduct lookup +\nevent logging", fillcolor="#E6F1FB", color="#185FA5"];
+    jev [label="jev.rs\noptional, feature-flagged\n(JEV_ENABLED)", fillcolor="#F1EFE8", color="#5F5E5A", style="rounded,filled,dashed"];
+  }
+
+  db [label="SQLite\nproducts, recognition_events", shape=cylinder, fillcolor="#E1F5EE", color="#0F6E56"];
+  train [label="training_data/<sku>/*.jpg\n(local, opt-in)", shape=folder, fillcolor="#E1F5EE", color="#0F6E56"];
+  jevapi [label="TypeSafe Jev API\napi.typesafe.ai\n(hosted, external)", fillcolor="#F1EFE8", color="#5F5E5A", style="rounded,filled,dashed"];
+
+  ui -> api [label="frame (base64)\n/ confirm"];
+  api -> vision [label="image"];
+  vision -> api [label="top-3 predictions"];
+  api -> decision [label="confidence"];
+  api -> catalogue [label="class -> product"];
+  catalogue -> db;
+  api -> train [label="on confirm", style=dashed];
+  api -> jev [style=dashed, label="comparison only"];
+  jev -> jevapi [style=dashed, label="800ms timeout,\nnever blocks a sale"];
+  api -> ui [label="decision +\ncandidates"];
+}

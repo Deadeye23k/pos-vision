@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Produce recognition</title>
+  <script src="/alpine.min.js" defer></script>
+  <style>
+    body {
+      margin: 0;
+      font-family: Arial, Helvetica, sans-serif;
+      background: #fff;
+      color: #111;
+    }
+    header {
+      padding: 10px 16px;
+      border-bottom: 1px solid #ccc;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    header h1 { font-size: 16px; margin: 0; font-weight: bold; }
+    .health-dot { font-size: 12px; color: #555; }
+    .health-dot.ok { color: green; }
+    .health-dot.err { color: red; }
+
+    main {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 16px;
+      display: grid;
+      gap: 16px;
+      grid-template-columns: 1fr;
+    }
+    @media (min-width: 700px) {
+      main { grid-template-columns: 1fr 260px; }
+    }
+
+    .panel {
+      border: 1px solid #ccc;
+      padding: 12px;
+    }
+    .panel h2 {
+      font-size: 13px;
+      margin: 0 0 10px;
+      border-bottom: 1px solid #ddd;
+      padding-bottom: 6px;
+    }
+
+    video {
+      width: 100%;
+      background: #000;
+      aspect-ratio: 4 / 3;
+      object-fit: cover;
+    }
+    .camera-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 10px;
+    }
+    button {
+      font: inherit;
+      padding: 6px 12px;
+      cursor: pointer;
+    }
+    button:disabled { cursor: not-allowed; opacity: 0.6; }
+
+    .status-line {
+      font-size: 13px;
+      color: #555;
+      margin-top: 8px;
+      min-height: 18px;
+    }
+    .status-line.err { color: #b00; }
+
+    .predictions { margin-top: 14px; }
+    .prediction-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 8px;
+      border: 1px solid #ddd;
+      margin-bottom: 6px;
+      font-size: 13px;
+    }
+    .prediction-row .rank { color: #777; min-width: 20px; }
+    .prediction-row .class-name { flex: 1; }
+    .prediction-row .confidence { font-weight: bold; }
+    .prediction-row.candidate { cursor: pointer; }
+    .prediction-row.candidate:hover { background: #f0f0f0; }
+    .prediction-row.accepted { border-color: green; }
+    .prediction-row.confirmed { border-color: green; background: #eaffea; margin-top: 10px; }
+    .decision-label { font-size: 12px; color: #555; margin: 0 0 6px; }
+    button.small { padding: 3px 8px; font-size: 12px; margin-left: 8px; }
+    .search-box {
+      width: 100%;
+      padding: 6px 8px;
+      border: 1px solid #ccc;
+      font: inherit;
+      margin-bottom: 8px;
+    }
+  </style>
+</head>
+<body x-data="posVision()" x-init="init()">
+  <header>
+    <h1>Produce recognition (prototype)</h1>
+    <span class="health-dot" :class="health === 'ok' ? 'ok' : (health === 'error' ? 'err' : '')"
+          x-text="health === 'ok' ? 'API healthy' : (health === 'error' ? 'API unreachable' : 'checking...')"></span>
+  </header>
+
+  <main>
+    <section class="panel">
+      <h2>Camera</h2>
+      <video x-ref="video" autoplay playsinline muted></video>
+      <div class="camera-actions">
+        <button class="primary" @click="startCamera()" :disabled="cameraOn">
+          <span x-text="cameraOn ? 'Camera active' : 'Enable camera'"></span>
+        </button>
+        <button class="secondary" @click="stopCamera()" :disabled="!cameraOn">Stop</button>
+        <button class="primary" @click="captureAndRecognize()" :disabled="!cameraOn || recognizing">
+          <span x-text="recognizing ? 'Recognizing...' : 'Capture & Recognize'"></span>
+        </button>
+      </div>
+      <canvas x-ref="canvas" style="display:none"></canvas>
+      <p class="status-line" :class="{ err: cameraError }" x-text="cameraStatus"></p>
+
+      <label style="font-size: 13px; display: block; margin-top: 4px;">
+        <input type="checkbox" x-model="saveForTraining" />
+        Save photo when confirmed (local only, used later to retrain the model)
+      </label>
+      <p style="font-size: 13px; margin: 8px 0 0;"><a href="/stats.md" target="_blank">View test results so far</a></p>
+
+      <template x-if="predictions.length > 0">
+        <div class="predictions">
+          <p class="decision-label" x-text="decisionLabel"></p>
+
+          <template x-if="decision === 'AUTO_ACCEPT' && autoAccepted">
+            <div class="prediction-row accepted">
+              <span class="class-name" x-text="autoAccepted.name"></span>
+              <span class="confidence">RM <span x-text="autoAccepted.unit_price.toFixed(2)"></span></span>
+              <button class="secondary small" @click="switchToManual()">Not right?</button>
+            </div>
+          </template>
+
+          <template x-if="decision === 'REVIEW'">
+            <div>
+              <template x-for="(c, i) in candidates" :key="c.sku">
+                <div class="prediction-row candidate" @click="pickCandidate(c)">
+                  <span class="rank" x-text="'#' + (i + 1)"></span>
+                  <span class="class-name" x-text="c.name"></span>
+                  <span class="confidence" x-text="(c.confidence * 100).toFixed(1) + '%'"></span>
+                </div>
+              </template>
+              <button class="secondary small" @click="switchToManual()">None of these</button>
+            </div>
+          </template>
+
+          <template x-if="decision === 'MANUAL'">
+            <div>
+              <input class="search-box" type="text" placeholder="Search product..."
+                     x-model="searchQuery" @input.debounce.300ms="searchProducts()" />
+              <template x-for="p in searchResults" :key="p.sku">
+                <div class="prediction-row candidate" @click="pickCandidate(p)">
+                  <span class="class-name" x-text="p.name"></span>
+                  <span class="confidence">RM <span x-text="p.unit_price.toFixed(2)"></span></span>
+                </div>
+              </template>
+            </div>
+          </template>
+
+          <template x-if="confirmed">
+            <div class="prediction-row confirmed">
+              <span class="class-name">Confirmed: <span x-text="confirmed.name"></span></span>
+              <span class="confidence">RM <span x-text="confirmed.unit_price.toFixed(2)"></span></span>
+            </div>
+          </template>
+        </div>
+      </template>
+    </section>
+  </main>
+
+  <script>
+    function posVision() {
+      return {
+        health: 'checking',
+        cameraOn: false,
+        cameraError: false,
+        cameraStatus: 'Camera not started.',
+        stream: null,
+        recognizing: false,
+        predictions: [],
+        decision: null,
+        decisionLabel: '',
+        eventId: null,
+        autoAccepted: null,
+        candidates: [],
+        confirmed: null,
+        searchQuery: '',
+        searchResults: [],
+
+        init() {
+          this.checkHealth();
+        },
+
+        async checkHealth() {
+          try {
+            const res = await fetch('/health');
+            if (!res.ok) throw new Error('bad status');
+            const data = await res.json();
+            this.health = data.status === 'ok' ? 'ok' : 'error';
+          } catch (e) {
+            this.health = 'error';
+          }
+        },
+
+        async startCamera() {
+          this.cameraError = false;
+          this.cameraStatus = 'Requesting camera permission...';
+          try {
+            this.stream = await navigator.mediaDevices.getUserMedia({
+              video: { facingMode: 'environment' },
+              audio: false,
+            });
+            this.$refs.video.srcObject = this.stream;
+            this.cameraOn = true;
+            this.cameraStatus = 'Camera live.';
+          } catch (err) {
+            this.cameraError = true;
+            this.cameraOn = false;
+            this.cameraStatus = 'Could not access camera: ' + err.message;
+          }
+        },
+
+        stopCamera() {
+          if (this.stream) {
+            this.stream.getTracks().forEach((t) => t.stop());
+            this.stream = null;
+          }
+          this.$refs.video.srcObject = null;
+          this.cameraOn = false;
+          this.cameraStatus = 'Camera stopped.';
+          this.resetResult();
+        },
+
+        saveForTraining: true,
+        lastImageBase64: null,
+
+        resetResult() {
+          this.predictions = [];
+          this.decision = null;
+          this.decisionLabel = '';
+          this.eventId = null;
+          this.autoAccepted = null;
+          this.candidates = [];
+          this.confirmed = null;
+          this.searchQuery = '';
+          this.searchResults = [];
+          this.lastImageBase64 = null;
+        },
+
+        async captureAndRecognize() {
+          this.recognizing = true;
+          this.resetResult();
+          this.cameraError = false;
+          this.cameraStatus = 'Capturing frame...';
+          try {
+            const video = this.$refs.video;
+            const canvas = this.$refs.canvas;
+            canvas.width = video.videoWidth;
+            canvas.height = video.videoHeight;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+            const dataUrl = canvas.toDataURL('image/jpeg', 0.9);
+            const base64 = dataUrl.split(',')[1];
+            this.lastImageBase64 = base64;
+
+            this.cameraStatus = 'Recognizing...';
+            const res = await fetch('/recognize', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ image_base64: base64 }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'recognition failed');
+
+            this.predictions = data.raw_predictions || [];
+            this.decision = data.decision;
+            this.eventId = data.event_id;
+            this.candidates = data.candidates || [];
+            this.autoAccepted = data.auto_accepted || null;
+
+            if (this.decision === 'AUTO_ACCEPT' && this.autoAccepted) {
+              this.decisionLabel = 'Auto-accepted';
+            } else if (this.decision === 'REVIEW') {
+              this.decisionLabel = 'Pick the right one';
+            } else {
+              this.decisionLabel = 'Not sure, search below';
+              await this.searchProducts();
+            }
+            this.cameraStatus = 'Done in ' + data.latency_ms + 'ms.';
+          } catch (err) {
+            this.cameraError = true;
+            this.cameraStatus = 'Recognition failed: ' + err.message;
+          } finally {
+            this.recognizing = false;
+          }
+        },
+
+        switchToManual() {
+          this.decision = 'MANUAL';
+          this.decisionLabel = 'Search manually';
+          this.searchProducts();
+        },
+
+        async searchProducts() {
+          try {
+            const url = this.searchQuery
+              ? '/products?q=' + encodeURIComponent(this.searchQuery)
+              : '/products';
+            const res = await fetch(url);
+            const data = await res.json();
+            this.searchResults = data.products || [];
+          } catch (err) {
+            this.cameraError = true;
+            this.cameraStatus = 'Product search failed: ' + err.message;
+          }
+        },
+
+        async pickCandidate(product) {
+          try {
+            const body = { event_id: this.eventId, sku: product.sku };
+            if (this.saveForTraining && this.lastImageBase64) {
+              body.image_base64 = this.lastImageBase64;
+            }
+            const res = await fetch('/confirm', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(body),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || 'confirm failed');
+            this.confirmed = data.confirmed;
+            this.decision = null; // hide the candidate/search UI once confirmed
+            this.cameraStatus = 'Confirmed: ' + data.confirmed.name +
+              (data.saved_training_image ? ' (photo saved for training)' : '');
+          } catch (err) {
+            this.cameraError = true;
+            this.cameraStatus = 'Confirm failed: ' + err.message;
+          }
+        },
+      };
+    }
+  </script>
+</body>
+</html>
